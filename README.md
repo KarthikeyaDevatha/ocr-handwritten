@@ -32,6 +32,24 @@ source venv/bin/activate  # Linux/Mac
 pip install -r requirements.txt
 ```
 
+```
+
+## Dataset Preparation
+
+### IAM Handwriting Database
+Once you have downloaded the IAM dataset (lines and xml):
+
+```bash
+python data/scripts/process_iam.py --iam-dir data/raw/IAM
+```
+
+### Google MathWriting
+Once you have downloaded the MathWriting dataset:
+
+```bash
+python data/scripts/process_mathwriting.py --input-dir data/raw/MathWriting
+```
+
 ## Quick Start
 
 ### 1. Generate Sample Data

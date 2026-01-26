@@ -54,6 +54,8 @@ class TextOCR:
         self.timeout = timeout
         self.confidence_threshold = confidence_threshold
         
+        self.torch_model = None
+        
         # Setup providers
         providers = ['CUDAExecutionProvider', 'CPUExecutionProvider'] if device == 'cuda' else ['CPUExecutionProvider']
         
@@ -77,6 +79,7 @@ class TextOCR:
         if local_tokenizer_valid:
             self.processor = TrOCRProcessor.from_pretrained(tokenizer_path, use_fast=False)
         else:
+            # Fallback to small model (base is too large/slow to download)
             print(f"Loading default processor (tokenizer not found or incomplete at {tokenizer_path})")
             self.processor = TrOCRProcessor.from_pretrained("microsoft/trocr-small-handwritten", use_fast=False)
         
@@ -156,6 +159,7 @@ class TextOCR:
             # Run decoder
             decoder_inputs = {
                 "input_ids": decoder_input_ids,
+                "attention_mask": np.ones_like(decoder_input_ids, dtype=np.int64),
                 "encoder_hidden_states": encoder_output
             }
             
@@ -227,30 +231,37 @@ class TextOCR:
                 inference_time=time.time() - start_time
             )
         
-        # Run encoder
-        encoder_output = self.encoder_session.run(
-            None,
-            {"pixel_values": pixel_values}
-        )[0]
-        
-        # Decode
-        token_ids, avg_log_prob = self._greedy_decode_onnx(encoder_output)
-        
-        # Decode tokens to text
-        text = self.processor.tokenizer.decode(token_ids, skip_special_tokens=True)
-        
-        inference_time = time.time() - start_time
-        
-        # Check confidence
-        confidence = np.exp(avg_log_prob)  # Convert log prob to probability
-        rerouted = confidence < self.confidence_threshold
-        
-        return OCRResult(
-            text=text.strip(),
-            confidence=float(confidence),
-            inference_time=inference_time,
-            rerouted=rerouted
-        )
+        try:
+            # Run encoder
+            encoder_output = self.encoder_session.run(
+                None,
+                {"pixel_values": pixel_values}
+            )[0]
+            
+            # Decode
+            token_ids, avg_log_prob = self._greedy_decode_onnx(encoder_output)
+            
+            # Decode tokens to text
+            text = self.processor.tokenizer.decode(token_ids, skip_special_tokens=True)
+            
+            inference_time = time.time() - start_time
+            
+            # Check confidence
+            confidence = np.exp(avg_log_prob)  # Convert log prob to probability
+            rerouted = confidence < self.confidence_threshold
+            
+            return OCRResult(
+                text=text.strip(),
+                confidence=float(confidence),
+                inference_time=inference_time,
+                rerouted=rerouted
+            )
+        except Exception as e:
+            print(f"ONNX inference failed: {e}. Falling back to PyTorch.")
+            self.use_torch_fallback = True
+            if self.torch_model is None:
+                self._init_torch_model()
+            return self._recognize_torch(pil_image, start_time)
     
     def _recognize_torch(self, image: Image.Image, start_time: float) -> OCRResult:
         """Fallback recognition using PyTorch model."""
@@ -265,7 +276,11 @@ class TextOCR:
             generated_ids = self.torch_model.generate(
                 pixel_values,
                 max_new_tokens=self.max_new_tokens,
-                num_beams=self.num_beams
+                num_beams=self.num_beams,
+                repetition_penalty=2.0,      # Penalize repetition strongly
+                length_penalty=1.0,          # Penalize very long sequences
+                early_stopping=True,
+                no_repeat_ngram_size=3       # Prevent repeating 3-grams
             )
         
         text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]

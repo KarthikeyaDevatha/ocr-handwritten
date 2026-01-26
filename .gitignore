@@ -71,7 +71,11 @@ Thumbs.db
 
 # Project specific
 data/raw/
-data/synthetic/*.png
+data/synthetic/
+data/synthetic_lines_iam/
+data/processed/
+data/custom_lines/
+data/manifests/*.jsonl
 data/yolo_layout/
 models/yolo/*.onnx
 models/trocr_text/*.onnx

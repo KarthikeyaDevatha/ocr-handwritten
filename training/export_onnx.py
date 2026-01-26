@@ -125,9 +125,10 @@ def export_with_transformers(
                 super().__init__()
                 self.decoder = decoder
             
-            def forward(self, input_ids, encoder_hidden_states):
+            def forward(self, input_ids, attention_mask, encoder_hidden_states):
                 outputs = self.decoder(
                     input_ids=input_ids,
+                    attention_mask=attention_mask,
                     encoder_hidden_states=encoder_hidden_states
                 )
                 return outputs.logits
@@ -135,16 +136,18 @@ def export_with_transformers(
         decoder_wrapper = DecoderWrapper(model.decoder)
         
         dummy_input_ids = torch.tensor([[processor.tokenizer.cls_token_id]])
+        dummy_metrics_mask = torch.ones_like(dummy_input_ids)
         dummy_encoder_output = torch.randn(1, 577, 384)  # ViT output shape
         
         torch.onnx.export(
             decoder_wrapper,
-            (dummy_input_ids, dummy_encoder_output),
+            (dummy_input_ids, dummy_metrics_mask, dummy_encoder_output),
             decoder_path,
-            input_names=["input_ids", "encoder_hidden_states"],
+            input_names=["input_ids", "attention_mask", "encoder_hidden_states"],
             output_names=["logits"],
             dynamic_axes={
                 "input_ids": {0: "batch_size", 1: "sequence_length"},
+                "attention_mask": {0: "batch_size", 1: "sequence_length"},
                 "encoder_hidden_states": {0: "batch_size", 1: "encoder_sequence_length"},
                 "logits": {0: "batch_size", 1: "sequence_length"}
             },
