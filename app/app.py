@@ -30,7 +30,15 @@ st.set_page_config(
 
 
 @st.cache_resource
-def load_pipeline(device: str = "cpu", text_model_dir: str = "models/trocr_text", math_model_dir: str = "models/trocr_math") -> OCRPipeline:
+def load_pipeline(
+    device: str = "cpu", 
+    text_model_dir: str = "models/trocr_text", 
+    math_model_dir: str = "models/trocr_math",
+    use_pix2tex: bool = False,
+    use_printed_text_model: bool = False,
+    mathpix_app_id: str = None,
+    mathpix_app_key: str = None
+) -> OCRPipeline:
     """Load OCR pipeline (cached)."""
     # Create hash for caching different models
     # Actually streamlit caches based on arguments.
@@ -38,6 +46,10 @@ def load_pipeline(device: str = "cpu", text_model_dir: str = "models/trocr_text"
         device=device,
         text_model_dir=text_model_dir,
         math_model_dir=math_model_dir,
+        use_pix2tex=use_pix2tex,
+        use_printed_text_model=use_printed_text_model,
+        mathpix_app_id=mathpix_app_id,
+        mathpix_app_key=mathpix_app_key,
         debug_output=True,
         save_debug_images=True
     )
@@ -118,6 +130,21 @@ def main():
             math_model_dir = os.path.join("checkpoints/trocr_math", selected_ckpt_math)
 
     st.sidebar.divider()
+    
+    st.sidebar.subheader("☁️ Cloud APIs Server")
+    use_printed_text_model = st.sidebar.checkbox("Use Native TrOCR-Printed (Text OCR)", value=False, help="Switch character recognition from handwriting to the Printed Mathpix-Equivalent natively.")
+    use_pix2tex = st.sidebar.checkbox("Use Native Pix2Tex (LaTeX-OCR)", value=False, help="Use the open-source Mathpix equivalent locally instead of an API")
+    use_mathpix = st.sidebar.checkbox("Use Mathpix API", value=False, help="Use Mathpix API instead of local models for maximum accuracy")
+    mathpix_app_id = None
+    mathpix_app_key = None
+    if use_mathpix:
+        mathpix_app_id = st.sidebar.text_input("Mathpix App ID", type="password")
+        mathpix_app_key = st.sidebar.text_input("Mathpix App Key", type="password")
+        if not mathpix_app_id or not mathpix_app_key:
+            st.sidebar.warning("Please enter your Mathpix credentials to use the API.")
+        st.sidebar.caption("Get free keys at [mathpix.com](https://mathpix.com/)")
+
+    st.sidebar.divider()
 
     device = st.sidebar.selectbox(
         "Compute Device",
@@ -189,7 +216,7 @@ def main():
                 
                 try:
                     # Load pipeline
-                    pipeline = load_pipeline(device, text_model_dir, math_model_dir)
+                    pipeline = load_pipeline(device, text_model_dir, math_model_dir, use_pix2tex, use_printed_text_model, mathpix_app_id, mathpix_app_key)
                     
                     # Update config
                     pipeline.config.confidence_threshold = confidence_threshold

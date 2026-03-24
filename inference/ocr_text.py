@@ -82,9 +82,10 @@ class TextOCR:
         if local_tokenizer_valid:
             self.processor = TrOCRProcessor.from_pretrained(tokenizer_path, use_fast=False)
         else:
-            # Fallback to small model (base is too large/slow to download)
+            # Fallback to model_path if it's a HuggingFace string, else handwritten
+            fallback_tokenizer = self.model_path if self.model_path and "microsoft/" in self.model_path else "microsoft/trocr-small-handwritten"
             print(f"Loading default processor (tokenizer not found or incomplete at {tokenizer_path})")
-            self.processor = TrOCRProcessor.from_pretrained("microsoft/trocr-small-handwritten", use_fast=False)
+            self.processor = TrOCRProcessor.from_pretrained(fallback_tokenizer, use_fast=False)
         
         # Fallback to HuggingFace if ONNX not available
         self.use_torch_fallback = self.encoder_session is None or self.decoder_session is None
@@ -100,7 +101,12 @@ class TextOCR:
             import torch
             
             # Try custom path first, then default to HuggingFace
-            path = self.model_path if self.model_path and os.path.exists(os.path.join(self.model_path, "config.json")) else "microsoft/trocr-small-handwritten"
+            if self.model_path and os.path.exists(os.path.join(self.model_path, "config.json")):
+                path = self.model_path
+            elif self.model_path and "microsoft/" in self.model_path:
+                path = self.model_path
+            else:
+                path = "microsoft/trocr-small-handwritten"
             print(f"Loading PyTorch model from: {path}")
             
             self.torch_model = VisionEncoderDecoderModel.from_pretrained(path)

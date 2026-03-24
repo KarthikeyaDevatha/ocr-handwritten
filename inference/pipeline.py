@@ -67,6 +67,12 @@ class PipelineConfig:
     # Device
     device: str = "cpu"
     
+    # Mathpix API / Open-Source Native Alternative
+    use_pix2tex: bool = False
+    use_printed_text_model: bool = False
+    mathpix_app_id: Optional[str] = None
+    mathpix_app_key: Optional[str] = None
+    
     # Layout detection
     layout_conf_threshold: float = 0.5
     layout_iou_threshold: float = 0.45
@@ -135,25 +141,50 @@ class OCRPipeline:
             device=self.config.device
         )
         
-        # Initialize text OCR
-        print("Loading text OCR...")
-        self.text_ocr = create_text_ocr(
-            model_dir=self.config.text_model_dir,
-            device=self.config.device
-        )
-        self.text_ocr.max_new_tokens = self.config.max_new_tokens
-        self.text_ocr.timeout = self.config.ocr_timeout
-        self.text_ocr.confidence_threshold = self.config.confidence_threshold
+        text_model_path = "microsoft/trocr-base-printed" if self.config.use_printed_text_model else self.config.text_model_dir
         
-        # Initialize math OCR
-        print("Loading math OCR...")
-        self.math_ocr = create_math_ocr(
-            model_dir=self.config.math_model_dir,
-            device=self.config.device
-        )
-        self.math_ocr.max_new_tokens = self.config.max_new_tokens
-        self.math_ocr.timeout = self.config.ocr_timeout
-        self.math_ocr.confidence_threshold = self.config.confidence_threshold
+        if self.config.use_pix2tex:
+            print("Using Native Pix2Tex (LaTeX-OCR) for Math...")
+            from inference.pix2tex_math import Pix2TexEngine, Pix2TexWrapper
+            pix2tex_engine = Pix2TexEngine()
+            self.math_ocr = Pix2TexWrapper(pix2tex_engine)
+            
+            # Text OCR still uses standard
+            print("Loading text OCR...")
+            self.text_ocr = create_text_ocr(
+                model_dir=text_model_path,
+                device=self.config.device
+            )
+            self.text_ocr.max_new_tokens = self.config.max_new_tokens
+            self.text_ocr.timeout = self.config.ocr_timeout
+            self.text_ocr.confidence_threshold = self.config.confidence_threshold
+            
+        elif self.config.mathpix_app_id and self.config.mathpix_app_key:
+            print("Using Mathpix API for OCR...")
+            from inference.mathpix import MathpixEngine, MathpixTextWrapper, MathpixMathWrapper
+            mathpix_engine = MathpixEngine(self.config.mathpix_app_id, self.config.mathpix_app_key)
+            self.text_ocr = MathpixTextWrapper(mathpix_engine)
+            self.math_ocr = MathpixMathWrapper(mathpix_engine)
+        else:
+            # Initialize text OCR
+            print("Loading text OCR...")
+            self.text_ocr = create_text_ocr(
+                model_dir=text_model_path,
+                device=self.config.device
+            )
+            self.text_ocr.max_new_tokens = self.config.max_new_tokens
+            self.text_ocr.timeout = self.config.ocr_timeout
+            self.text_ocr.confidence_threshold = self.config.confidence_threshold
+            
+            # Initialize math OCR
+            print("Loading math OCR...")
+            self.math_ocr = create_math_ocr(
+                model_dir=self.config.math_model_dir,
+                device=self.config.device
+            )
+            self.math_ocr.max_new_tokens = self.config.max_new_tokens
+            self.math_ocr.timeout = self.config.ocr_timeout
+            self.math_ocr.confidence_threshold = self.config.confidence_threshold
         
         # Initialize reconstructor
         self.reconstructor = DocumentReconstructor()
