@@ -1,17 +1,50 @@
-"""CROHME 2019 loader yielding (image_path, latex_label)."""
+import os
+import cv2
+import numpy as np
+from typing import Tuple, Generator
 
-from __future__ import annotations
+class CrohmeLoader:
+    def __init__(self, data_dir: str):
+        """
+        Loads the CROHME dataset (Handwritten math expressions)
+        Format varies, assuming standard INKML parsed to images or raw PNGs mapped to labels.
+        Assuming pre-rendered images and a labels.txt format for simplicity.
+        """
+        self.data_dir = data_dir
+        self.image_dir = os.path.join(data_dir, "images")
+        self.label_file = os.path.join(data_dir, "labels.txt")
+        self.samples = self._load_manifest()
 
-from pathlib import Path
-from typing import Iterator, Tuple
+    def _load_manifest(self):
+        samples = []
+        if not os.path.exists(self.label_file):
+            return samples
+            
+        with open(self.label_file, "r") as f:
+            for line in f:
+                parts = line.strip().split("\t")
+                if len(parts) >= 2:
+                    samples.append({
+                        "filename": parts[0],
+                        "latex": parts[1]
+                    })
+        return samples
 
+    def get_sample(self, idx: int) -> Tuple[np.ndarray, str]:
+        if idx < 0 or idx >= len(self.samples):
+            raise IndexError("Index out of bounds")
+            
+        sample = self.samples[idx]
+        img_path = os.path.join(self.image_dir, sample["filename"])
+        image = cv2.imread(img_path)
+        if image is None:
+            raise IOError(f"Failed to load image: {img_path}")
+            
+        return image, sample["latex"]
 
-def load_crohme(root: str) -> Iterator[Tuple[str, str]]:
-    root_path = Path(root)
-    for inkml in root_path.rglob("*.inkml"):
-        latex = ""
-        text = inkml.read_text(encoding="utf-8", errors="ignore")
-        if "<annotation type=\"truth\">" in text:
-            latex = text.split("<annotation type=\"truth\">", 1)[1].split("</annotation>", 1)[0].strip()
-        image_path = str(inkml.with_suffix(".png"))
-        yield image_path, latex
+    def load_generator(self) -> Generator[Tuple[np.ndarray, str], None, None]:
+        for idx in range(len(self.samples)):
+            try:
+                yield self.get_sample(idx)
+            except IOError:
+                continue

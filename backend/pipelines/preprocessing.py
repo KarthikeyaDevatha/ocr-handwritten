@@ -1,116 +1,152 @@
-"""Image preprocessing utilities for document OCR pipelines."""
-
-from __future__ import annotations
-
 import cv2
 import numpy as np
 
-
 def deskew_image(image: np.ndarray) -> np.ndarray:
-    """Deskew image using min-area-rect angle estimation on foreground pixels."""
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image.copy()
-    inv = cv2.bitwise_not(gray)
-    coords = np.column_stack(np.where(inv > 0))
+    """Deskew the image using minAreaRect on contours."""
+    if len(image.shape) == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = image.copy()
+        
+    # Invert binary thresholding
+    _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    
+    # Find coordinates of all non-zero pixels
+    coords = np.column_stack(np.where(thresh > 0))
     if coords.size == 0:
         return image
-
+        
     angle = cv2.minAreaRect(coords)[-1]
-    angle = -(90 + angle) if angle < -45 else -angle
-    h, w = gray.shape[:2]
-    matrix = cv2.getRotationMatrix2D((w // 2, h // 2), angle, 1.0)
-    flags = cv2.INTER_CUBIC
-    border = cv2.BORDER_REPLICATE
-    if image.ndim == 3:
-        return cv2.warpAffine(image, matrix, (w, h), flags=flags, borderMode=border)
-    return cv2.warpAffine(gray, matrix, (w, h), flags=flags, borderMode=border)
-
+    
+    if angle < -45:
+        angle = -(90 + angle)
+    else:
+        angle = -angle
+        
+    # If the angle is too large, it might be a false positive or orientation issue rather than slight skew
+    if abs(angle) > 15:
+        return image
+        
+    (h, w) = image.shape[:2]
+    center = (w // 2, h // 2)
+    
+    M = cv2.getRotationMatrix2D(center, angle, 1.0)
+    rotated = cv2.warpAffine(
+        image, M, (w, h), 
+        flags=cv2.INTER_CUBIC, 
+        borderMode=cv2.BORDER_REPLICATE
+    )
+    
+    return rotated
 
 def correct_perspective(image: np.ndarray) -> np.ndarray:
-    """Apply perspective correction from largest page-like contour."""
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+    """Correct perspective by finding the largest document-like contour."""
+    if len(image.shape) == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = image.copy()
+        
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
-    edges = cv2.Canny(blur, 50, 150)
-    contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    contours = sorted(contours, key=cv2.contourArea, reverse=True)
-
-    page = None
-    for contour in contours[:5]:
-        peri = cv2.arcLength(contour, True)
-        approx = cv2.approxPolyDP(contour, 0.02 * peri, True)
-        if len(approx) == 4:
-            page = approx.reshape(4, 2)
-            break
-
-    if page is None:
+    edged = cv2.Canny(blur, 50, 150)
+    
+    contours, _ = cv2.findContours(edged.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    if not contours:
         return image
-
-    rect = _order_points(page)
+        
+    contours = sorted(contours, key=cv2.contourArea, reverse=True)[:5]
+    doc_cnt = None
+    
+    for c in contours:
+        peri = cv2.arcLength(c, True)
+        approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+        
+        if len(approx) == 4:
+            doc_cnt = approx
+            break
+            
+    if doc_cnt is None:
+        return image # Cannot find 4 corners
+        
+    # Reorder points: top-left, top-right, bottom-right, bottom-left
+    pts = doc_cnt.reshape(4, 2)
+    rect = np.zeros((4, 2), dtype="float32")
+    
+    s = pts.sum(axis=1)
+    rect[0] = pts[np.argmin(s)]
+    rect[2] = pts[np.argmax(s)]
+    
+    diff = np.diff(pts, axis=1)
+    rect[1] = pts[np.argmin(diff)]
+    rect[3] = pts[np.argmax(diff)]
+    
     (tl, tr, br, bl) = rect
-    width_a = np.linalg.norm(br - bl)
-    width_b = np.linalg.norm(tr - tl)
-    max_width = max(int(width_a), int(width_b))
-    height_a = np.linalg.norm(tr - br)
-    height_b = np.linalg.norm(tl - bl)
-    max_height = max(int(height_a), int(height_b))
-
-    dst = np.array(
-        [[0, 0], [max_width - 1, 0], [max_width - 1, max_height - 1], [0, max_height - 1]],
-        dtype="float32",
-    )
-    matrix = cv2.getPerspectiveTransform(rect, dst)
-    return cv2.warpPerspective(image, matrix, (max_width, max_height))
-
+    
+    widthA = np.sqrt(((br[0] - bl[0]) ** 2) + ((br[1] - bl[1]) ** 2))
+    widthB = np.sqrt(((tr[0] - tl[0]) ** 2) + ((tr[1] - tl[1]) ** 2))
+    maxWidth = max(int(widthA), int(widthB))
+    
+    heightA = np.sqrt(((tr[0] - br[0]) ** 2) + ((tr[1] - br[1]) ** 2))
+    heightB = np.sqrt(((tl[0] - bl[0]) ** 2) + ((tl[1] - bl[1]) ** 2))
+    maxHeight = max(int(heightA), int(heightB))
+    
+    dst = np.array([
+        [0, 0],
+        [maxWidth - 1, 0],
+        [maxWidth - 1, maxHeight - 1],
+        [0, maxHeight - 1]
+    ], dtype="float32")
+        
+    M = cv2.getPerspectiveTransform(rect, dst)
+    warped = cv2.warpPerspective(image, M, (maxWidth, maxHeight))
+    
+    return warped
 
 def denoise(image: np.ndarray) -> np.ndarray:
-    """Denoise image while preserving edges."""
-    if image.ndim == 3:
-        return cv2.fastNlMeansDenoisingColored(image, None, 10, 10, 7, 21)
-    return cv2.fastNlMeansDenoising(image, None, 10, 7, 21)
-
-
-def adaptive_threshold(image: np.ndarray) -> np.ndarray:
-    """Adaptive thresholding for robust binarization under uneven lighting."""
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
-    return cv2.adaptiveThreshold(
-        gray,
-        255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY,
-        31,
-        15,
-    )
-
+    """Apply Gaussian denoising."""
+    return cv2.GaussianBlur(image, (5, 5), 0)
 
 def normalize_contrast(image: np.ndarray) -> np.ndarray:
-    """Normalize contrast via CLAHE."""
-    if image.ndim == 2:
-        return cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(image)
+    """Normalize contrast using CLAHE (Contrast Limited Adaptive Histogram Equalization)."""
+    if len(image.shape) == 3:
+        # Convert to LAB space to apply CLAHE to L channel only
+        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        cl = clahe.apply(l)
+        limg = cv2.merge((cl, a, b))
+        final = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
+        return final
+    else:
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        return clahe.apply(image)
 
-    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-    cl = clahe.apply(l)
-    merged = cv2.merge((cl, a, b))
-    return cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
-
+def adaptive_threshold(image: np.ndarray) -> np.ndarray:
+    """Apply adaptive thresholding for better text visibility."""
+    if len(image.shape) == 3:
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = image.copy()
+        
+    thresh = cv2.adaptiveThreshold(
+        gray, 255, 
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+        cv2.THRESH_BINARY, 11, 2
+    )
+    return thresh
 
 def preprocess_pipeline(image: np.ndarray) -> np.ndarray:
-    """Chain preprocessing steps in order optimized for document quality."""
-    step = correct_perspective(image)
-    step = deskew_image(step)
-    step = denoise(step)
-    step = normalize_contrast(step)
-    step = adaptive_threshold(step)
-    return step
-
-
-def _order_points(points: np.ndarray) -> np.ndarray:
-    rect = np.zeros((4, 2), dtype="float32")
-    s = points.sum(axis=1)
-    rect[0] = points[np.argmin(s)]
-    rect[2] = points[np.argmax(s)]
-
-    diff = np.diff(points, axis=1)
-    rect[1] = points[np.argmin(diff)]
-    rect[3] = points[np.argmax(diff)]
-    return rect
+    """
+    Chains all preprocessing steps in optimal order:
+    1. Correct Perspective
+    2. Deskew
+    3. Normalize Contrast (CLAHE)
+    4. Denoise
+    5. Adaptive Threshold
+    """
+    img = correct_perspective(image)
+    img = deskew_image(img)
+    img = normalize_contrast(img)
+    img = denoise(img)
+    img = adaptive_threshold(img)
+    return img

@@ -1,80 +1,109 @@
-"""Semantic reasoning layer to build assignment structure from OCR blocks."""
-
-from __future__ import annotations
-
 import json
+import logging
 import os
-import re
-from typing import List
+from typing import List, Dict, Any
 
-from backend.pipelines.ocr_router import OCRResult
-
+try:
+    import openai
+except ImportError:
+    openai = None
 
 class SemanticParser:
-    def __init__(self) -> None:
-        self.api_key = os.getenv("OPENAI_API_KEY", "")
+    def __init__(self, api_key: str = None):
+        self.api_key = api_key or os.environ.get("LLM_API_KEY", "")
+        if self.api_key and openai is not None:
+            openai.api_key = self.api_key
+            
+        self.system_prompt = """
+        You are a scientific document parser.
+        Given OCR output from a student assignment, extract:
+        1. Problem type (algebra / calculus / chemistry / geometry / statistics / unknown)
+        2. Question boundaries (where each question starts and ends)
+        3. Solution steps (numbered reasoning steps if present)
+        4. Subject classification
+        5. Estimated grade level
+        Return ONLY valid JSON matching DocumentStructure schema.
+        No code blocks or markdown, just raw JSON string.
+        """
 
-    def parse_document(self, ocr_results: List[OCRResult]) -> dict:
-        payload = [r.__dict__ for r in ocr_results]
-        if self.api_key:
-            llm = self._parse_with_llm(payload)
-            if llm:
-                return llm
+    def _call_llm(self, user_prompt: str) -> str:
+        """Helper to invoke LLM with robust error handling."""
+        if not self.api_key or openai is None:
+            logging.error("LLM API key missing or openai not installed.")
+            return "{}"
 
-        blocks = []
-        for idx, item in enumerate(ocr_results, start=1):
-            text = item.text or item.latex
-            problem = self.classify_problem(text)
-            steps = self.extract_steps(text)
-            blocks.append(
-                {
-                    "block_id": f"b{idx:03d}",
-                    "type": "question" if idx == 1 else "answer",
-                    "raw_text": text,
-                    "latex": item.latex,
-                    "problem_type": problem,
-                    "subject": "mathematics",
-                    "solution_steps": steps,
-                    "confidence": item.confidence,
-                    "bounding_box": [0, 0, 0, 0],
-                }
+        try:
+            # Assuming openai < 1.0. For > 1.0 client=OpenAI() is used. Using generic dict structure.
+            response = openai.ChatCompletion.create(
+                model="gpt-4o",
+                messages=[
+                    {"role": "system", "content": self.system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                temperature=0.0
             )
-        return {
-            "pages": [{"page_number": 1, "blocks": blocks}],
-            "metadata": {
-                "subject": "mathematics",
-                "grade_level": "grade_10",
-                "total_questions": len(blocks),
-            },
-        }
+            content = response.choices[0].message.content.strip()
+            # Strip markdown json blocks if returned
+            if content.startswith("```json"):
+                content = content[7:-3].strip()
+            elif content.startswith("```"):
+                content = content[3:-3].strip()
+            return content
+        except Exception as e:
+            logging.error(f"Semantic parsing failed: {e}")
+            return "{}"
+
+    def parse_document(self, ocr_results: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Takes raw OCR blocks and groups/parses them into structured document JSON.
+        ocr_results format: [{"region_id": str, "text": str, "latex": str, "type": str}, ...]
+        """
+        # Linearize OCR results for LLM
+        linear_text = ""
+        for i, block in enumerate(ocr_results):
+            txt = block.get('latex') or block.get('text', '')
+            b_type = block.get('type', 'text')
+            linear_text += f"Block {i} [{b_type}]: {txt}\n"
+            
+        prompt = f"Parse the following OCR blocks:\n\n{linear_text}"
+        
+        json_resp = self._call_llm(prompt)
+        try:
+            return json.loads(json_resp)
+        except json.JSONDecodeError:
+            logging.error("Semantic Parser returned invalid JSON")
+            return {
+                "error": "Failed to parse JSON from LLM",
+                "raw_response": json_resp
+            }
 
     def classify_problem(self, latex: str) -> str:
-        text = latex.lower()
-        if "\\int" in text:
-            return "calculus_integral"
-        if "x^2" in text or "quadratic" in text:
-            return "quadratic_equation"
-        if any(tok in text for tok in ["h2o", "co2", "na", "cl"]):
-            return "chemistry_formula"
-        return "general_problem"
+        """
+        Quickly classify a single LaTeX snippet.
+        """
+        prompt = f"Classify this problem type. Return ONLY one word: algebra, calculus, chemistry, geometry, statistics. \nInput: {latex}"
+        resp = self._call_llm(prompt)
+        # Fallback to dictionary extraction to be safe
+        valid_classes = ["algebra", "calculus", "chemistry", "geometry", "statistics"]
+        for vc in valid_classes:
+            if vc in resp.lower():
+                return vc
+        return "unknown"
 
     def extract_steps(self, text: str) -> List[str]:
-        parts = re.split(r"(?:\n|\r|\t|\d+\.)", text)
-        cleaned = [p.strip() for p in parts if p.strip()]
-        return cleaned[:8]
-
-    def _parse_with_llm(self, payload: list[dict]) -> dict | None:
+        """
+        Extract numerical reasoning or solution steps from combined text block.
+        """
+        prompt = f"Extract solution steps from this text. Return a JSON array of strings for each step. \nText: {text}"
+        resp = self._call_llm(prompt)
         try:
-            from openai import OpenAI
-
-            client = OpenAI(api_key=self.api_key)
-            prompt = (
-                "You are a scientific document parser. Given OCR output from a student assignment, "
-                "extract problem type, question boundaries, solution steps, subject, grade level. "
-                "Return ONLY valid JSON.\n"
-                f"OCR={json.dumps(payload)}"
-            )
-            resp = client.responses.create(model="gpt-4o-mini", input=prompt)
-            return json.loads(resp.output_text)
+            data = json.loads(resp)
+            if isinstance(data, list):
+                return data
+            if isinstance(data, dict) and "steps" in data:
+                return data["steps"]
         except Exception:
-            return None
+            # Fallback to newline splitting if JSON fails
+            pass
+            
+        return [step.strip() for step in text.split('\n') if step.strip()]

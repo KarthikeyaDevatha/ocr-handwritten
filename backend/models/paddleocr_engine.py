@@ -1,34 +1,61 @@
-"""Printed text OCR wrapper around PaddleOCR."""
-
-from __future__ import annotations
-
-from typing import Any, List
-
-import cv2
 import numpy as np
+from typing import List, Dict, Any
+import logging
 
+try:
+    from paddleocr import PaddleOCR
+except ImportError:
+    logging.warning("paddleocr not installed. PaddleOCR wrapper will fail on init.")
+    PaddleOCR = None
 
 class PrintedTextOCR:
-    def __init__(self) -> None:
-        self.ocr = None
-        try:
-            from paddleocr import PaddleOCR
-
-            self.ocr = PaddleOCR(use_angle_cls=True, lang="en", show_log=False)
-        except Exception:
-            self.ocr = None
+    def __init__(self, lang: str = 'en'):
+        if PaddleOCR is None:
+            raise ImportError("Please install paddleocr: pip install paddleocr paddlepaddle")
+            
+        self.ocr_engine = PaddleOCR(use_angle_cls=True, lang=lang, show_log=False)
 
     def extract_text(self, image_crop: np.ndarray) -> str:
-        results = self.extract_with_boxes(image_crop)
-        return "\n".join(item["text"] for item in results)
+        """
+        Extract clean string text from image crop.
+        Handles both single-line and multi-line.
+        """
+        result = self.ocr_engine.ocr(image_crop, cls=True)
+        
+        # Result is a list of lines, where each line is a list of [box, (text, confidence)]
+        # Sometimes PaddleOCR returns a list of results per page, so result[0] is the page content.
+        if not result or not result[0]:
+            return ""
+            
+        page_results = result[0]
+        extracted_lines = []
+        
+        for line in page_results:
+            box = line[0]
+            text, _ = line[1]
+            extracted_lines.append(text)
+            
+        return "\n".join(extracted_lines)
 
-    def extract_with_boxes(self, image_crop: np.ndarray) -> List[dict[str, Any]]:
-        if self.ocr is None:
-            return []
-        rgb = cv2.cvtColor(image_crop, cv2.COLOR_BGR2RGB) if image_crop.ndim == 3 else image_crop
-        result = self.ocr.ocr(rgb, cls=True)
-        out: List[dict[str, Any]] = []
-        for line in result[0] if result else []:
-            box, (text, conf) = line
-            out.append({"text": text.strip(), "box": box, "confidence": float(conf)})
+    def extract_with_boxes(self, image_crop: np.ndarray) -> List[Dict[str, Any]]:
+        """
+        Extract text along with bounding boxes and confidence scores.
+        """
+        result = self.ocr_engine.ocr(image_crop, cls=True)
+        
+        out = []
+        if not result or not result[0]:
+            return out
+            
+        page_results = result[0]
+        
+        for line in page_results:
+            box = line[0]
+            text, conf = line[1]
+            out.append({
+                "text": text,
+                "box": box,
+                "confidence": float(conf)
+            })
+            
         return out
